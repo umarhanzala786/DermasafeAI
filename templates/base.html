@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  >
+
+  <meta
+    name="description"
+    content="Dermasafe AI - AI-assisted preliminary skin disease screening platform"
+  >
+
+  <title>
+    {% block title %}Dermasafe AI{% endblock %}
+  </title>
+
+  <!-- Google Font -->
+  <link
+    rel="preconnect"
+    href="https://fonts.googleapis.com"
+  >
+
+  <link
+    rel="preconnect"
+    href="https://fonts.gstatic.com"
+    crossorigin
+  >
+
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet"
+  >
+
+  <!-- Main CSS -->
+  <link
+    rel="stylesheet"
+    href="{{ url_for('static', filename='style.css') }}"
+  >
+
+  {% block head %}{% endblock %}
+
+</head>
+
+
+<body>
+
+  <!-- =====================================================
+       TOP NAVBAR
+  ====================================================== -->
+
+  <header class="topbar">
+
+    <!-- Brand -->
+    <a
+      class="brand"
+      href="{{ url_for('home') }}"
+    >
+      <span class="brand-mark">✚</span>
+
+      <span>
+        Dermasafe <b>AI</b>
+      </span>
+    </a>
+
+
+    <!-- Mobile Menu Button -->
+    <button
+      class="mobile-toggle"
+      aria-label="Open menu"
+      data-mobile-menu
+      type="button"
+    >
+      ☰
+    </button>
+
+
+    <!-- Navigation -->
+    <nav
+      class="nav-links"
+      data-nav
+    >
+
+      <!-- Public Pages -->
+
+      <a href="{{ url_for('home') }}">
+        Home
+      </a>
+
+      <a href="{{ url_for('how_it_works') }}">
+        How It Works
+      </a>
+
+      <a href="{{ url_for('about') }}">
+        About
+      </a>
+
+
+      <!-- Logged-in User -->
+
+      {% if logged_in %}
+
+        <a href="{{ url_for('dashboard') }}">
+          Dashboard
+        </a>
+
+        <a href="{{ url_for('profile') }}">
+          Profile
+        </a>
+
+        <a
+          class="nav-logout"
+          href="{{ url_for('logout') }}"
+        >
+          Logout
+        </a>
+
+
+      <!-- Guest User -->
+
+      {% else %}
+
+        <a href="{{ url_for('login') }}">
+          Login
+        </a>
+
+        <a
+          class="nav-cta"
+          href="{{ url_for('signup') }}"
+        >
+          Get Started
+        </a>
+
+      {% endif %}
+
+    </nav>
+
+  </header>
+
+
+  <!-- =====================================================
+       MAIN CONTENT
+  ====================================================== -->
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+
+  <!-- =====================================================
+       FOOTER
+  ====================================================== -->
+
+  <footer class="footer">
+
+    <div>
+
+      <div class="brand footer-brand">
+
+        <span class="brand-mark">
+          ✚
+        </span>
+
+        <span>
+          Dermasafe <b>AI</b>
+        </span>
+
+      </div>
+
+
+      <p>
+        AI-assisted preliminary dermatology
+        screening for smarter clinical workflows.
+      </p>
+
+    </div>
+
+
+    <!-- Footer Links -->
+
+    <div class="footer-links">
+
+      <a href="{{ url_for('how_it_works') }}">
+        How It Works
+      </a>
+
+      <a href="{{ url_for('about') }}">
+        About
+      </a>
+
+
+      {% if logged_in %}
+
+        <a href="{{ url_for('dashboard') }}">
+          Dashboard
+        </a>
+
+      {% else %}
+
+        <a href="{{ url_for('login') }}">
+          Portal
+        </a>
+
+      {% endif %}
+
+    </div>
+
+
+    <!-- Footer Bottom -->
+
+    <div class="footer-bottom">
+
+      <span>
+        © {{ year }} Dermasafe AI
+      </span>
+
+      <span>
+        Screening support only ·
+        Not a medical diagnosis
+      </span>
+
+    </div>
+
+  </footer>
+
+
+  <!-- =====================================================
+       MAIN JAVASCRIPT
+       
+       IMPORTANT:
+       script.js is loaded ONLY here.
+       Do not load it again inside dashboard.html.
+  ====================================================== -->
+
+  <script
+    src="{{ url_for('static', filename='script.js') }}"
+  ></script>
+
+
+  {% block scripts %}{% endblock %}
+
+</body>
+
+</html>

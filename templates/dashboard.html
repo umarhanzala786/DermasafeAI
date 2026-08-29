@@ -1,0 +1,632 @@
+{% extends 'base.html' %}
+
+{% block title %}
+Dashboard | Dermasafe AI
+{% endblock %}
+
+{% block content %}
+
+<section class="app-shell">
+
+    <!-- =====================================================
+         SIDEBAR
+    ====================================================== -->
+
+    <aside class="sidebar">
+
+        <div class="sidebar-user">
+
+            <div class="avatar">
+                {{ current_name[0]|upper }}
+            </div>
+
+            <div>
+                <strong>{{ current_name }}</strong>
+                <small>Screening workspace</small>
+            </div>
+
+        </div>
+
+
+        <nav class="sidebar-nav">
+
+            <a class="active"
+               href="{{ url_for('dashboard') }}">
+                <span>⌂</span>
+                <span>Overview</span>
+            </a>
+
+            <a href="#new-scan">
+                <span>＋</span>
+                <span>New Scan</span>
+            </a>
+
+            <a href="#history">
+                <span>◷</span>
+                <span>Scan History</span>
+            </a>
+
+            <a href="{{ url_for('profile') }}">
+                <span>◎</span>
+                <span>Profile</span>
+            </a>
+
+            <a href="{{ url_for('logout') }}">
+                <span>↪</span>
+                <span>Logout</span>
+            </a>
+
+        </nav>
+
+
+        <div class="sidebar-note">
+
+            <div>
+                <strong>AI Model</strong>
+
+                <span class="status-dot"></span>
+
+                <span>
+                    {{ model_status }}
+                </span>
+            </div>
+
+            <small>
+                Five-class CNN screening model
+            </small>
+
+        </div>
+
+    </aside>
+
+
+    <!-- =====================================================
+         MAIN WORKSPACE
+    ====================================================== -->
+
+    <div class="workspace">
+
+
+        <!-- =================================================
+             HEADER
+        ================================================== -->
+
+        <header class="workspace-header">
+
+            <div>
+
+                <span class="section-kicker">
+                    CLINICAL WORKSPACE
+                </span>
+
+                <h1>
+                    Good to see you,
+                    {{ current_name.split(' ')[0] }}.
+                </h1>
+
+                <p>
+                    Review your screening activity or
+                    start a new AI-assisted skin screening.
+                </p>
+
+            </div>
+
+
+            <a
+                class="btn btn-primary"
+                href="#new-scan"
+            >
+                ＋ New Skin Scan
+            </a>
+
+        </header>
+
+
+        <!-- =================================================
+             STATISTICS
+        ================================================== -->
+
+        <div class="stat-grid">
+
+
+            <div class="stat-card">
+
+                <span>Total scans</span>
+
+                <strong>
+                    {{ total_scans }}
+                </strong>
+
+                <small>
+                    All-time screening records
+                </small>
+
+            </div>
+
+
+            <div class="stat-card">
+
+                <span>Last 30 days</span>
+
+                <strong>
+                    {{ recent_scans }}
+                </strong>
+
+                <small>
+                    Recent screening activity
+                </small>
+
+            </div>
+
+
+            <div class="stat-card">
+
+                <span>AI model</span>
+
+                <strong>
+                    {{ model_status }}
+                </strong>
+
+                <small>
+                    TensorFlow / Keras CNN
+                </small>
+
+            </div>
+
+
+            <div class="stat-card">
+
+                <span>Classes</span>
+
+                <strong>
+                    05
+                </strong>
+
+                <small>
+                    Supported skin conditions
+                </small>
+
+            </div>
+
+        </div>
+
+
+        <!-- =================================================
+             MAIN GRID
+        ================================================== -->
+
+        <div class="dashboard-grid">
+
+
+            <!-- =================================================
+                 NEW SCAN
+            ================================================== -->
+
+            <section
+                class="panel scan-panel"
+                id="new-scan"
+            >
+
+                <div class="panel-heading">
+
+                    <div>
+
+                        <span class="section-kicker">
+                            NEW SCREENING
+                        </span>
+
+                        <h2>
+                            Patient & lesion details
+                        </h2>
+
+                    </div>
+
+                    <span class="step-tag">
+                        Step 1 of 1
+                    </span>
+
+                </div>
+
+
+                <!-- IMPORTANT:
+                     JavaScript handles this form.
+                     It will NOT submit as normal GET.
+                -->
+
+                <form
+                    id="scanForm"
+                    method="POST"
+                    action="{{ url_for('predict_scan') }}"
+                    enctype="multipart/form-data"
+                    novalidate
+                >
+
+
+                    <!-- Patient information -->
+
+                    <div class="form-grid">
+
+
+                        <label>
+
+                            Patient name
+
+                            <input
+                                type="text"
+                                name="patient_name"
+                                placeholder="e.g. Aisha Khan"
+                                autocomplete="off"
+                                required
+                            >
+
+                        </label>
+
+
+                        <label>
+
+                            Age
+
+                            <input
+                                type="number"
+                                name="age"
+                                min="1"
+                                max="120"
+                                placeholder="Age"
+                                required
+                            >
+
+                        </label>
+
+
+                        <label>
+
+                            Gender
+
+                            <select
+                                name="gender"
+                                required
+                            >
+
+                                <option value="">
+                                    Select gender
+                                </option>
+
+                                <option value="Male">
+                                    Male
+                                </option>
+
+                                <option value="Female">
+                                    Female
+                                </option>
+
+                                <option value="Other">
+                                    Other
+                                </option>
+
+                            </select>
+
+                        </label>
+
+
+                    </div>
+
+
+                    <!-- Symptoms -->
+
+                    <label>
+
+                        Symptoms / observations
+
+                        <textarea
+                            name="symptoms"
+                            rows="4"
+                            placeholder="Describe itching, redness, texture, affected area or other observations..."
+                            required
+                        ></textarea>
+
+                    </label>
+
+
+                    <!-- =================================================
+                         IMAGE UPLOAD
+                    ================================================== -->
+
+                    <div
+                        class="upload-zone"
+                        id="uploadZone"
+                    >
+
+                        <input
+                            type="file"
+                            name="image"
+                            id="imageFile"
+                            accept="image/png,image/jpeg,image/webp"
+                            required
+                        >
+
+
+                        <div class="upload-icon">
+                            ↑
+                        </div>
+
+
+                        <strong>
+                            Drop lesion image here
+                        </strong>
+
+
+                        <span>
+                            or click to browse · PNG, JPG, WEBP · max 8 MB
+                        </span>
+
+
+                        <div
+                            id="preview"
+                            class="image-preview hidden"
+                        >
+
+                            <img
+                                id="previewImage"
+                                alt="Selected lesion preview"
+                            >
+
+                        </div>
+
+                    </div>
+
+
+                    <!-- =================================================
+                         FORM FOOTER
+                    ================================================== -->
+
+                    <div class="form-foot">
+
+                        <span>
+                            🔒 Uploaded images are used only for this screening request.
+                        </span>
+
+
+                        <button
+                            class="btn btn-primary"
+                            type="submit"
+                            id="submitBtn"
+                        >
+
+                            <span id="submitText">
+                                Run AI Analysis
+                            </span>
+
+                            <span>
+                                →
+                            </span>
+
+                        </button>
+
+                    </div>
+
+                </form>
+
+
+                <!-- =================================================
+                     RESULT
+                ================================================== -->
+
+                <div
+                    id="output"
+                    class="result-panel hidden"
+                ></div>
+
+            </section>
+
+
+            <!-- =================================================
+                 AI INSIGHTS
+            ================================================== -->
+
+            <section
+                class="panel insight-panel"
+            >
+
+                <div class="panel-heading">
+
+                    <div>
+
+                        <span class="section-kicker">
+                            AI INSIGHTS
+                        </span>
+
+                        <h2>
+                            Screening distribution
+                        </h2>
+
+                    </div>
+
+                </div>
+
+
+                <div class="chart-container">
+
+                    <canvas
+                        id="diseaseChart"
+                    ></canvas>
+
+                </div>
+
+
+                <div class="insight-note">
+
+                    Distribution is calculated from
+                    your saved screening records.
+
+                </div>
+
+            </section>
+
+        </div>
+
+
+        <!-- =================================================
+             HISTORY
+        ================================================== -->
+
+        <section
+            class="panel history-panel"
+            id="history"
+        >
+
+            <div class="panel-heading">
+
+                <div>
+
+                    <span class="section-kicker">
+                        RECORDS
+                    </span>
+
+                    <h2>
+                        Recent scan history
+                    </h2>
+
+                </div>
+
+
+                <input
+                    class="table-search"
+                    id="historySearch"
+                    placeholder="Search patient or result..."
+                    type="search"
+                >
+
+            </div>
+
+
+            <div class="table-wrap">
+
+                <table id="historyTable">
+
+                    <thead>
+
+                        <tr>
+
+                            <th>
+                                Date
+                            </th>
+
+                            <th>
+                                Patient
+                            </th>
+
+                            <th>
+                                Symptoms
+                            </th>
+
+                            <th>
+                                AI Result
+                            </th>
+
+                            <th>
+                                Report
+                            </th>
+
+                        </tr>
+
+                    </thead>
+
+
+                    <tbody>
+
+                        {% for row in records %}
+
+                        <tr>
+
+                            <td>
+                                {{ row.created_at.strftime('%d %b %Y · %H:%M') if row.created_at else 'N/A' }}
+                            </td>
+
+
+                            <td>
+
+                                <strong>
+                                    {{ row.patient_name }}
+                                </strong>
+
+                                <small>
+                                    {{ row.age }} yrs · {{ row.gender }}
+                                </small>
+
+                            </td>
+
+
+                            <td class="truncate">
+
+                                {{ row.symptoms }}
+
+                            </td>
+
+
+                            <td>
+
+                                <span class="result-badge">
+
+                                    {{ row.status }}
+
+                                </span>
+
+                            </td>
+
+
+                            <td>
+
+                                <a
+                                    class="report-link"
+                                    href="{{ url_for('download_report', scan_id=row.id) }}"
+                                >
+                                    PDF ↓
+                                </a>
+
+                            </td>
+
+                        </tr>
+
+                        {% else %}
+
+                        <tr>
+
+                            <td
+                                colspan="5"
+                                class="empty-state"
+                            >
+
+                                No scans yet.
+                                Start your first screening above.
+
+                            </td>
+
+                        </tr>
+
+                        {% endfor %}
+
+                    </tbody>
+
+                </table>
+
+            </div>
+
+        </section>
+
+
+    </div>
+
+</section>
+
+{% endblock %}
+
+
+<!-- =========================================================
+     IMPORTANT: LOAD BOTH CHART.JS AND YOUR SCRIPT.JS
+========================================================= -->
+
+{% block scripts %}
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+{% endblock %}
