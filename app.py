@@ -1,6 +1,16 @@
 import os
 import io
+import logging
+import hashlib
+import hmac
 from datetime import datetime
+
+try:
+    import bcrypt
+    HAS_BCRYPT = True
+except ImportError:
+    bcrypt = None
+    HAS_BCRYPT = False
 
 import numpy as np
 import mysql.connector
@@ -14,7 +24,8 @@ from flask import (
     redirect,
     url_for,
     session,
-    send_file
+    send_file,
+    g
 )
 
 from werkzeug.utils import secure_filename
@@ -31,9 +42,23 @@ from tensorflow.keras.layers import (
 from tensorflow.keras.preprocessing import image
 
 from reportlab.lib.pagesizes import letter
+from reportlab.lib.colors import HexColor
 from reportlab.pdfgen import canvas
 
 from dotenv import load_dotenv
+
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+logger = logging.getLogger("dermasafe")
 
 
 # ============================================================
@@ -81,15 +106,8 @@ PROFILE_UPLOAD_DIR = os.path.join(
     "uploads"
 )
 
-os.makedirs(
-    UPLOAD_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
-    PROFILE_UPLOAD_DIR,
-    exist_ok=True
-)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(PROFILE_UPLOAD_DIR, exist_ok=True)
 
 
 # ============================================================
@@ -103,6 +121,42 @@ MODEL_CLASSES = [
     "Ring worm",
     "Vitiligo"
 ]
+
+
+# ============================================================
+# GEMINI AI CONFIGURATION
+# ============================================================
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+gemini_model = None
+
+if GEMINI_API_KEY:
+
+    try:
+
+        import google.generativeai as genai
+
+        genai.configure(api_key=GEMINI_API_KEY)
+
+        gemini_model = genai.GenerativeModel(
+            "gemini-2.0-flash"
+        )
+
+        logger.info("Gemini AI: CONFIGURED")
+
+    except Exception as e:
+
+        logger.warning(
+            "Gemini AI: UNAVAILABLE (%s)", e
+        )
+
+        gemini_model = None
+
+else:
+    logger.info(
+        "Gemini AI: No API key set (GEMINI_API_KEY in .env)"
+    )
 
 
 # ============================================================
@@ -132,26 +186,15 @@ def load_dermasafe_model():
 
     try:
 
-        # ----------------------------------------------------
-        # Check model file
-        # ----------------------------------------------------
-
         if not os.path.exists(MODEL_PATH):
 
             raise FileNotFoundError(
                 f"Model file not found: {MODEL_PATH}"
             )
 
-
-        # ----------------------------------------------------
-        # Rebuild original architecture
-        # ----------------------------------------------------
-
         loaded_model = Sequential([
 
-            Input(
-                shape=(64, 64, 3)
-            ),
+            Input(shape=(64, 64, 3)),
 
             Conv2D(
                 filters=32,
@@ -168,9 +211,7 @@ def load_dermasafe_model():
                 name="max_pooling2d"
             ),
 
-            Flatten(
-                name="flatten"
-            ),
+            Flatten(name="flatten"),
 
             Dense(
                 500,
@@ -186,33 +227,11 @@ def load_dermasafe_model():
 
         ])
 
-
-        # ----------------------------------------------------
-        # Build model
-        # ----------------------------------------------------
-
         loaded_model.build(
-            input_shape=(
-                None,
-                64,
-                64,
-                3
-            )
+            input_shape=(None, 64, 64, 3)
         )
 
-
-        # ----------------------------------------------------
-        # Load trained weights
-        # ----------------------------------------------------
-
-        loaded_model.load_weights(
-            MODEL_PATH
-        )
-
-
-        # ----------------------------------------------------
-        # Compile
-        # ----------------------------------------------------
+        loaded_model.load_weights(MODEL_PATH)
 
         loaded_model.compile(
             optimizer="adam",
@@ -220,29 +239,13 @@ def load_dermasafe_model():
             metrics=["accuracy"]
         )
 
-
-        print("------------------------------------------")
-        print("AI MODEL STATUS: LOADED")
-        print(f"Model: {MODEL_PATH}")
-        print(
-            f"Input shape: {loaded_model.input_shape}"
-        )
-        print(
-            f"Output shape: {loaded_model.output_shape}"
-        )
-        print("------------------------------------------")
-
+        logger.info("AI Model: LOADED (%s)", MODEL_PATH)
 
         return loaded_model
 
-
     except Exception as e:
 
-        print("------------------------------------------")
-        print("AI MODEL STATUS: FAILED")
-        print(f"Model: {MODEL_PATH}")
-        print(f"Error: {e}")
-        print("------------------------------------------")
+        logger.error("AI Model: FAILED (%s)", e)
 
         return None
 
@@ -255,123 +258,247 @@ model = load_dermasafe_model()
 # DATABASE CONFIGURATION
 # ============================================================
 
-DB_HOST = os.getenv(
-    "DB_HOST",
-    "localhost"
-)
-
-DB_USER = os.getenv(
-    "DB_USER",
-    "root"
-)
-
-DB_PASSWORD = os.getenv(
-    "DB_PASSWORD",
-    ""
-)
-
-DB_NAME = os.getenv(
-    "DB_NAME",
-    "skin_disease_db"
-)
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "localhost"),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "database": os.getenv("DB_NAME", "skin_disease_db"),
+    "autocommit": False
+}
 
 
-# ============================================================
-# DATABASE CONNECTION
-# ============================================================
-
-db = None
-cursor = None
-
-
-def connect_database():
-
-    global db
-    global cursor
-
+def auto_migrate_schema():
+    """
+    Ensures backwards compatibility by adding any missing columns
+    (e.g., last_login, confidence, ai_insights) without failing.
+    """
     try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cur = conn.cursor()
 
-        db = mysql.connector.connect(
+        # 1. Expand password column for bcrypt (VARCHAR 255)
+        try:
+            cur.execute("ALTER TABLE users MODIFY COLUMN password VARCHAR(255) NOT NULL")
+            conn.commit()
+        except Exception:
+            pass
 
-            host=DB_HOST,
+        # 2. Add last_login to users
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN last_login DATETIME DEFAULT NULL")
+            conn.commit()
+        except Exception:
+            pass
 
-            user=DB_USER,
+        # 3. Add profile_image to users
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN profile_image VARCHAR(500) DEFAULT NULL")
+            conn.commit()
+        except Exception:
+            pass
 
-            password=DB_PASSWORD,
+        # 4. Add confidence to scan_records
+        try:
+            cur.execute("ALTER TABLE scan_records ADD COLUMN confidence FLOAT DEFAULT NULL")
+            conn.commit()
+        except Exception:
+            pass
 
-            database=DB_NAME,
+        # 5. Add ai_insights to scan_records
+        try:
+            cur.execute("ALTER TABLE scan_records ADD COLUMN ai_insights TEXT DEFAULT NULL")
+            conn.commit()
+        except Exception:
+            pass
 
-            autocommit=False
-
-        )
-
-        cursor = db.cursor(
-            dictionary=True
-        )
-
-        print("------------------------------------------")
-        print("DATABASE STATUS: CONNECTED")
-        print(f"Database: {DB_NAME}")
-        print("------------------------------------------")
-
-        return True
-
-
+        cur.close()
+        conn.close()
+        logger.info("Database schema auto-migration check complete.")
     except Exception as e:
+        logger.warning("Database schema check skipped: %s", e)
 
-        db = None
-        cursor = None
 
-        print("------------------------------------------")
-        print("DATABASE STATUS: FAILED")
-        print(f"Error: {e}")
-        print("------------------------------------------")
+# Run auto-migration once on startup
+auto_migrate_schema()
 
+
+# ============================================================
+# PER-REQUEST DATABASE CONNECTION (THREAD-SAFE)
+# ============================================================
+
+def get_db():
+
+    """
+    Returns a per-request MySQL connection stored in Flask's
+    g object. This is the correct Flask pattern — each request
+    gets its own connection, avoiding thread-safety issues.
+    """
+
+    if "db" not in g:
+
+        try:
+
+            g.db = mysql.connector.connect(**DB_CONFIG)
+            g.cursor = g.db.cursor(dictionary=True)
+
+        except Exception as e:
+
+            logger.error("Database connection failed: %s", e)
+            g.db = None
+            g.cursor = None
+
+    return g.db, g.cursor
+
+
+@app.teardown_appcontext
+def close_db(exception):
+
+    """Close the database connection at the end of each request."""
+
+    cursor = g.pop("cursor", None)
+    db = g.pop("db", None)
+
+    if cursor:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+
+    if db:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+# ============================================================
+# PASSWORD HASHING (BCRYPT WITH BUILT-IN FALLBACK)
+# ============================================================
+
+def hash_password(plain_password):
+
+    """
+    Hash a plaintext password using bcrypt if installed,
+    otherwise fallback to hashlib sha256 with salt.
+    """
+
+    if HAS_BCRYPT and bcrypt is not None:
+        return bcrypt.hashpw(
+            plain_password.encode("utf-8"),
+            bcrypt.gensalt()
+        ).decode("utf-8")
+
+    # Built-in fallback: SHA256 with secret salt
+    salt = os.getenv("SECRET_KEY", "dermasafe_salt")
+    return "sha256$" + hashlib.sha256(
+        (plain_password + salt).encode("utf-8")
+    ).hexdigest()
+
+
+def verify_password(plain_password, stored_password):
+
+    """
+    Verify a password against stored value.
+    Supports bcrypt, sha256 fallback, and legacy plaintext.
+    """
+
+    if not stored_password:
         return False
 
+    # 1. Check bcrypt hash
+    if is_password_hashed(stored_password):
+        if HAS_BCRYPT and bcrypt is not None:
+            try:
+                return bcrypt.checkpw(
+                    plain_password.encode("utf-8"),
+                    stored_password.encode("utf-8")
+                )
+            except Exception:
+                return False
+        return False
 
-connect_database()
+    # 2. Check sha256 fallback hash
+    if stored_password.startswith("sha256$"):
+        salt = os.getenv("SECRET_KEY", "dermasafe_salt")
+        expected = "sha256$" + hashlib.sha256(
+            (plain_password + salt).encode("utf-8")
+        ).hexdigest()
+        return hmac.compare_digest(stored_password, expected)
+
+    # 3. Legacy plaintext password
+    return plain_password == stored_password
+
+
+def is_password_hashed(password_value):
+
+    """Check if a stored password is already bcrypt or sha256 hashed."""
+
+    if not password_value:
+        return False
+
+    return (
+        password_value.startswith("$2b$")
+        or password_value.startswith("$2a$")
+        or password_value.startswith("sha256$")
+    )
 
 
 # ============================================================
-# ENSURE DATABASE CONNECTION
+# GEMINI AI INSIGHTS GENERATOR
 # ============================================================
 
-def ensure_db_connection():
+def generate_ai_insights(diagnosis, confidence, symptoms, age, gender):
 
-    global db
-    global cursor
+    """
+    Calls Google Gemini to generate detailed clinical insights
+    about the predicted skin condition.
+    """
+
+    if gemini_model is None:
+        return None
 
     try:
 
-        if db is None:
+        prompt = f"""You are a medical AI assistant integrated into a skin disease screening platform called DermasafeAI.
 
-            return connect_database()
+A CNN model has classified a skin lesion image with the following results:
 
+- Predicted Condition: {diagnosis}
+- Confidence: {confidence:.1f}%
+- Patient Age: {age}
+- Patient Gender: {gender}
+- Reported Symptoms: {symptoms}
 
-        if not db.is_connected():
+Please provide a concise, helpful response with these sections (use clear headings with markdown ##):
 
-            db.reconnect(
-                attempts=3,
-                delay=1
-            )
+## About {diagnosis}
+A brief 2-3 sentence overview of this skin condition.
 
-            cursor = db.cursor(
-                dictionary=True
-            )
+## Common Causes
+List 3-4 common causes or triggers.
 
+## Recommended Care
+Provide 3-4 practical treatment suggestions or home remedies.
 
-        return True
+## When to See a Doctor
+List 2-3 warning signs that need immediate professional attention.
 
+## Precautions
+2-3 skincare precautions specific to this condition.
+
+IMPORTANT: End with a clear disclaimer that this is AI-generated screening support and NOT a medical diagnosis. Keep the total response under 350 words. Do NOT use asterisks for bold — use plain text."""
+
+        response = gemini_model.generate_content(prompt)
+
+        if response and response.text:
+            return response.text.strip()
+
+        return None
 
     except Exception as e:
 
-        print(
-            "Database reconnect error:",
-            e
-        )
-
-        return connect_database()
+        logger.warning("Gemini insights error: %s", e)
+        return None
 
 
 # ============================================================
@@ -381,33 +508,21 @@ def ensure_db_connection():
 @app.context_processor
 def inject_global_variables():
 
-    current_name = session.get(
-        "name",
-        "User"
-    )
-
-    logged_in = (
-        "user" in session
-    )
+    current_name = session.get("name", "User")
+    logged_in = ("user" in session)
 
     return {
-
-        "current_name":
-            current_name,
-
-        "logged_in":
-            logged_in,
-
-        "model_status":
-            (
-                "Available"
-                if model is not None
-                else "Unavailable"
-            ),
-
-        "year":
-            datetime.now().year
-
+        "current_name": current_name,
+        "logged_in": logged_in,
+        "model_status": (
+            "Available" if model is not None
+            else "Unavailable"
+        ),
+        "gemini_status": (
+            "Available" if gemini_model is not None
+            else "Unavailable"
+        ),
+        "year": datetime.now().year
     }
 
 
@@ -418,9 +533,7 @@ def inject_global_variables():
 @app.route("/")
 def home():
 
-    return render_template(
-        "home.html"
-    )
+    return render_template("home.html")
 
 
 # ============================================================
@@ -430,9 +543,7 @@ def home():
 @app.route("/how-it-works")
 def how_it_works():
 
-    return render_template(
-        "how_it_works.html"
-    )
+    return render_template("how_it_works.html")
 
 
 # ============================================================
@@ -442,9 +553,7 @@ def how_it_works():
 @app.route("/about")
 def about():
 
-    return render_template(
-        "about.html"
-    )
+    return render_template("about.html")
 
 
 # ============================================================
@@ -471,7 +580,6 @@ def login():
             .get("password", "")
         )
 
-
         if not email or not password:
 
             return render_template(
@@ -479,73 +587,91 @@ def login():
                 error="Please enter email and password."
             )
 
-
         try:
 
-            if not ensure_db_connection():
+            db, cursor = get_db()
+
+            if db is None:
 
                 return render_template(
                     "login.html",
                     error="Database connection failed."
                 )
 
-
             cursor.execute(
                 """
                 SELECT *
                 FROM users
                 WHERE email = %s
-                  AND password = %s
                 LIMIT 1
                 """,
-                (
-                    email,
-                    password
-                )
+                (email,)
             )
 
             user = cursor.fetchone()
 
+            if user and verify_password(
+                password,
+                user["password"]
+            ):
 
-            if user:
+                # Safely auto-upgrade plaintext passwords to bcrypt if possible
+                try:
+                    if not is_password_hashed(user["password"]):
+                        cursor.execute(
+                            """
+                            UPDATE users
+                            SET password = %s
+                            WHERE email = %s
+                            """,
+                            (
+                                hash_password(password),
+                                email
+                            )
+                        )
+                        db.commit()
+                        logger.info(
+                            "Password upgraded to bcrypt for: %s",
+                            email
+                        )
+                except Exception as up_err:
+                    logger.warning("Could not auto-upgrade password: %s", up_err)
 
-                # IMPORTANT:
-                # Do not clear session here.
-                # Set authenticated session values.
+                # Safely update last login if column exists
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE users
+                        SET last_login = NOW()
+                        WHERE email = %s
+                        """,
+                        (email,)
+                    )
+                    db.commit()
+                except Exception as log_err:
+                    logger.debug("Could not update last_login: %s", log_err)
 
                 session["user"] = user["email"]
-
                 session["name"] = user["username"]
-
                 session.permanent = True
 
-                return redirect(
-                    url_for("dashboard")
-                )
-
+                return redirect(url_for("dashboard"))
 
             return render_template(
                 "login.html",
                 error="Invalid Email or Password!"
             )
 
-
         except Exception as e:
 
-            print(
-                "Login error:",
-                e
-            )
+            logger.error("Login error: %s", e)
 
             return render_template(
                 "login.html",
                 error="Unable to login. Please try again."
             )
 
-
-    return render_template(
-        "login.html"
-    )
+    return render_template("login.html")
 
 
 # ============================================================
@@ -578,7 +704,6 @@ def signup():
             .get("password", "")
         )
 
-
         if not name or not email or not password:
 
             return render_template(
@@ -586,16 +711,23 @@ def signup():
                 error="All fields are required."
             )
 
+        if len(password) < 8:
+
+            return render_template(
+                "signup.html",
+                error="Password must be at least 8 characters."
+            )
 
         try:
 
-            if not ensure_db_connection():
+            db, cursor = get_db()
+
+            if db is None:
 
                 return render_template(
                     "signup.html",
                     error="Database connection failed."
                 )
-
 
             cursor.execute(
                 """
@@ -609,7 +741,6 @@ def signup():
 
             existing_user = cursor.fetchone()
 
-
             if existing_user:
 
                 return render_template(
@@ -617,39 +748,25 @@ def signup():
                     error="Email already registered!"
                 )
 
+            # Hash the password with bcrypt
+            hashed = hash_password(password)
 
             cursor.execute(
                 """
                 INSERT INTO users
-                (
-                    username,
-                    email,
-                    password
-                )
-                VALUES
-                (
-                    %s,
-                    %s,
-                    %s
-                )
+                (username, email, password)
+                VALUES (%s, %s, %s)
                 """,
-                (
-                    name,
-                    email,
-                    password
-                )
+                (name, email, hashed)
             )
 
             db.commit()
 
+            logger.info("New user registered: %s", email)
 
             return redirect(
-                url_for(
-                    "login",
-                    created=1
-                )
+                url_for("login", created=1)
             )
-
 
         except Exception as e:
 
@@ -658,22 +775,14 @@ def signup():
             except Exception:
                 pass
 
-
-            print(
-                "Signup error:",
-                e
-            )
-
+            logger.error("Signup error: %s", e)
 
             return render_template(
                 "signup.html",
                 error="Unable to create account."
             )
 
-
-    return render_template(
-        "signup.html"
-    )
+    return render_template("signup.html")
 
 
 # ============================================================
@@ -684,15 +793,13 @@ def signup():
 def dashboard():
 
     if "user" not in session:
-
-        return redirect(
-            url_for("login")
-        )
-
+        return redirect(url_for("login"))
 
     try:
 
-        if not ensure_db_connection():
+        db, cursor = get_db()
+
+        if db is None:
 
             return render_template(
                 "dashboard.html",
@@ -701,14 +808,9 @@ def dashboard():
                 recent_scans=0
             )
 
-
         user_email = session["user"]
 
-
-        # ----------------------------------------------------
         # Scan history
-        # ----------------------------------------------------
-
         cursor.execute(
             """
             SELECT *
@@ -721,11 +823,7 @@ def dashboard():
 
         records = cursor.fetchall()
 
-
-        # ----------------------------------------------------
         # Total scans
-        # ----------------------------------------------------
-
         cursor.execute(
             """
             SELECT COUNT(*) AS total_scans
@@ -737,18 +835,12 @@ def dashboard():
 
         result = cursor.fetchone()
 
-
         total_scans = (
             int(result["total_scans"])
-            if result
-            else 0
+            if result else 0
         )
 
-
-        # ----------------------------------------------------
         # Recent 30 days
-        # ----------------------------------------------------
-
         cursor.execute(
             """
             SELECT COUNT(*) AS recent_scans
@@ -762,45 +854,47 @@ def dashboard():
 
         result = cursor.fetchone()
 
-
         recent_scans = (
             int(result["recent_scans"])
-            if result
-            else 0
+            if result else 0
         )
 
+        # Average confidence (safely handle if column missing)
+        avg_confidence = 0
+        try:
+            cursor.execute(
+                """
+                SELECT AVG(confidence) AS avg_conf
+                FROM scan_records
+                WHERE user_email = %s
+                  AND confidence IS NOT NULL
+                """,
+                (user_email,)
+            )
+            result = cursor.fetchone()
+            if result and result["avg_conf"] is not None:
+                avg_confidence = round(float(result["avg_conf"]), 1)
+        except Exception:
+            avg_confidence = 0
 
         return render_template(
-
             "dashboard.html",
-
             records=records,
-
             total_scans=total_scans,
-
-            recent_scans=recent_scans
-
+            recent_scans=recent_scans,
+            avg_confidence=avg_confidence
         )
-
 
     except Exception as e:
 
-        print(
-            "Dashboard error:",
-            e
-        )
-
+        logger.error("Dashboard error: %s", e)
 
         return render_template(
-
             "dashboard.html",
-
             records=[],
-
             total_scans=0,
-
-            recent_scans=0
-
+            recent_scans=0,
+            avg_confidence=0
         )
 
 
@@ -815,50 +909,35 @@ def dashboard():
 def profile():
 
     if "user" not in session:
-
-        return redirect(
-            url_for("login")
-        )
-
+        return redirect(url_for("login"))
 
     try:
 
-        if not ensure_db_connection():
+        db, cursor = get_db()
+
+        if db is None:
 
             return render_template(
                 "profile.html",
                 user=None,
                 total_scans=0,
-                name=session.get(
-                    "name",
-                    "User"
-                )
+                name=session.get("name", "User")
             )
-
 
         user_email = session["user"]
 
-
-        # ----------------------------------------------------
         # Profile image upload
-        # ----------------------------------------------------
-
         if request.method == "POST":
 
             profile_file = request.files.get(
                 "profile_image"
             )
 
-
-            if (
-                profile_file
-                and profile_file.filename
-            ):
+            if profile_file and profile_file.filename:
 
                 original_filename = secure_filename(
                     profile_file.filename
                 )
-
 
                 if original_filename:
 
@@ -866,27 +945,20 @@ def profile():
                         "%Y%m%d_%H%M%S_%f"
                     )
 
-
                     filename = (
                         f"{timestamp}_{original_filename}"
                     )
-
 
                     filepath = os.path.join(
                         PROFILE_UPLOAD_DIR,
                         filename
                     )
 
-
-                    profile_file.save(
-                        filepath
-                    )
-
+                    profile_file.save(filepath)
 
                     relative_path = (
                         f"uploads/{filename}"
                     )
-
 
                     cursor.execute(
                         """
@@ -894,20 +966,12 @@ def profile():
                         SET profile_image = %s
                         WHERE email = %s
                         """,
-                        (
-                            relative_path,
-                            user_email
-                        )
+                        (relative_path, user_email)
                     )
-
 
                     db.commit()
 
-
-        # ----------------------------------------------------
         # Get user
-        # ----------------------------------------------------
-
         cursor.execute(
             """
             SELECT *
@@ -920,11 +984,7 @@ def profile():
 
         user_info = cursor.fetchone()
 
-
-        # ----------------------------------------------------
         # Scan count
-        # ----------------------------------------------------
-
         cursor.execute(
             """
             SELECT COUNT(*) AS total_scans
@@ -936,51 +996,27 @@ def profile():
 
         result = cursor.fetchone()
 
-
         scan_count = (
             int(result["total_scans"])
-            if result
-            else 0
+            if result else 0
         )
-
 
         return render_template(
-
             "profile.html",
-
             user=user_info,
-
             total_scans=scan_count,
-
-            name=session.get(
-                "name",
-                "User"
-            )
-
+            name=session.get("name", "User")
         )
-
 
     except Exception as e:
 
-        print(
-            "Profile error:",
-            e
-        )
-
+        logger.error("Profile error: %s", e)
 
         return render_template(
-
             "profile.html",
-
             user=None,
-
             total_scans=0,
-
-            name=session.get(
-                "name",
-                "User"
-            )
-
+            name=session.get("name", "User")
         )
 
 
@@ -1001,30 +1037,22 @@ def predict_scan():
     if "user" not in session:
 
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Unauthorized. Please login again."
-
+            "error": "Unauthorized. Please login again."
         }), 401
-
 
     # --------------------------------------------------------
     # Database
     # --------------------------------------------------------
 
-    if not ensure_db_connection():
+    db, cursor = get_db()
+
+    if db is None:
 
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Database connection failed."
-
+            "error": "Database connection failed."
         }), 500
-
 
     # --------------------------------------------------------
     # Model
@@ -1033,14 +1061,9 @@ def predict_scan():
     if model is None:
 
         return jsonify({
-
             "success": False,
-
-            "error":
-                "AI model is currently unavailable. Please check the model file and restart the server."
-
+            "error": "AI model is currently unavailable."
         }), 503
-
 
     # --------------------------------------------------------
     # Form data
@@ -1070,105 +1093,55 @@ def predict_scan():
         .strip()
     )
 
-    uploaded_file = request.files.get(
-        "image"
-    )
-
+    uploaded_file = request.files.get("image")
 
     # --------------------------------------------------------
     # Validation
     # --------------------------------------------------------
 
     if not patient_name:
-
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Patient name is required."
-
+            "error": "Patient name is required."
         }), 400
-
 
     if not age:
-
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Patient age is required."
-
+            "error": "Patient age is required."
         }), 400
-
 
     try:
-
         age_value = int(age)
-
     except ValueError:
-
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Age must be a valid number."
-
+            "error": "Age must be a valid number."
         }), 400
-
 
     if age_value < 1 or age_value > 120:
-
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Age must be between 1 and 120."
-
+            "error": "Age must be between 1 and 120."
         }), 400
-
 
     if not gender:
-
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Gender is required."
-
+            "error": "Gender is required."
         }), 400
-
 
     if not symptoms:
-
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Symptoms or observations are required."
-
+            "error": "Symptoms or observations are required."
         }), 400
 
-
-    if (
-        uploaded_file is None
-        or not uploaded_file.filename
-    ):
-
+    if uploaded_file is None or not uploaded_file.filename:
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Please upload a skin image."
-
+            "error": "Please upload a skin image."
         }), 400
-
 
     # --------------------------------------------------------
     # File validation
@@ -1178,41 +1151,24 @@ def predict_scan():
         uploaded_file.filename
     )
 
-
     if not original_filename:
-
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Invalid image filename."
-
+            "error": "Invalid image filename."
         }), 400
 
-
     allowed_extensions = {
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".webp"
+        ".jpg", ".jpeg", ".png", ".webp"
     }
-
 
     extension = os.path.splitext(
         original_filename
     )[1].lower()
 
-
     if extension not in allowed_extensions:
-
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Only JPG, JPEG, PNG and WEBP images are supported."
-
+            "error": "Only JPG, JPEG, PNG and WEBP images are supported."
         }), 400
 
 
@@ -1222,15 +1178,11 @@ def predict_scan():
 
     user_email = session["user"]
 
-
     try:
 
         cursor.execute(
             """
-            SELECT
-                id,
-                status,
-                created_at
+            SELECT id, status, created_at
             FROM scan_records
             WHERE user_email = %s
               AND patient_name = %s
@@ -1251,76 +1203,43 @@ def predict_scan():
             )
         )
 
-
         existing_scan = cursor.fetchone()
-
 
         if existing_scan:
 
-            existing_status = (
-                existing_scan.get(
-                    "status",
-                    "Already processed"
-                )
+            existing_status = existing_scan.get(
+                "status", "Already processed"
             )
-
 
             diagnosis = (
-                str(existing_status)
-                .split(" (")[0]
+                str(existing_status).split(" (")[0]
             )
-
 
             confidence = None
 
-
             try:
-
                 confidence_text = (
                     str(existing_status)
                     .split("(")[1]
                     .split("%")[0]
                 )
-
-                confidence = float(
-                    confidence_text
-                )
-
+                confidence = float(confidence_text)
             except Exception:
-
                 confidence = None
 
-
             return jsonify({
-
                 "success": True,
-
                 "duplicate": True,
-
-                "scan_id":
-                    existing_scan["id"],
-
-                "result":
-                    existing_status,
-
-                "diagnosis":
-                    diagnosis,
-
-                "confidence":
-                    confidence,
-
-                "message":
-                    "This screening request was already processed."
-
+                "scan_id": existing_scan["id"],
+                "result": existing_status,
+                "diagnosis": diagnosis,
+                "confidence": confidence,
+                "message": "This screening request was already processed."
             })
-
 
     except Exception as e:
 
-        print(
-            "Duplicate check error:",
-            e
-        )
+        logger.warning("Duplicate check error: %s", e)
 
 
     # ========================================================
@@ -1331,39 +1250,21 @@ def predict_scan():
         "%Y%m%d_%H%M%S_%f"
     )
 
+    filename = f"{timestamp}_{original_filename}"
 
-    filename = (
-        f"{timestamp}_{original_filename}"
-    )
-
-
-    filepath = os.path.join(
-        UPLOAD_DIR,
-        filename
-    )
-
+    filepath = os.path.join(UPLOAD_DIR, filename)
 
     try:
 
-        uploaded_file.save(
-            filepath
-        )
+        uploaded_file.save(filepath)
 
     except Exception as e:
 
-        print(
-            "Image save error:",
-            e
-        )
-
+        logger.error("Image save error: %s", e)
 
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Unable to save uploaded image."
-
+            "error": "Unable to save uploaded image."
         }), 500
 
 
@@ -1373,130 +1274,85 @@ def predict_scan():
 
     try:
 
-        # Load image as 64x64
         img = image.load_img(
             filepath,
             target_size=(64, 64)
         )
 
+        x = image.img_to_array(img)
+        x = np.expand_dims(x, axis=0)
 
-        # Convert to numpy
-        x = image.img_to_array(
-            img
-        )
-
-
-        # Add batch dimension
-        x = np.expand_dims(
-            x,
-            axis=0
-        )
-
-
-        # Verify shape
-        if x.shape != (
-            1,
-            64,
-            64,
-            3
-        ):
-
+        if x.shape != (1, 64, 64, 3):
             raise ValueError(
                 f"Unexpected image shape: {x.shape}"
             )
 
+        preds = model.predict(x, verbose=0)
 
-        # Predict
-        preds = model.predict(
-            x,
-            verbose=0
-        )
-
-
-        # Verify output
         if (
             len(preds.shape) != 2
             or preds.shape[1] != 5
         ):
-
             raise ValueError(
                 f"Unexpected model output shape: {preds.shape}"
             )
 
-
-        # Predicted class
         label_index = int(
-            np.argmax(
-                preds,
-                axis=1
-            )[0]
+            np.argmax(preds, axis=1)[0]
         )
 
+        confidence = float(np.max(preds)) * 100
 
-        # Confidence
-        confidence = float(
-            np.max(preds)
-        ) * 100
-
-
-        # Class
         if (
             label_index < 0
             or label_index >= len(MODEL_CLASSES)
         ):
-
             raise ValueError(
                 "Invalid predicted class index."
             )
 
-
-        diagnosis = (
-            MODEL_CLASSES[
-                label_index
-            ]
-        )
-
+        diagnosis = MODEL_CLASSES[label_index]
 
         diagnosis_result = (
             f"{diagnosis} "
             f"({confidence:.1f}% Match)"
         )
 
+        # Build class probabilities
+        class_probabilities = {}
+        for i, cls in enumerate(MODEL_CLASSES):
+            class_probabilities[cls] = round(
+                float(preds[0][i]) * 100, 1
+            )
 
     except Exception as e:
 
-        print(
-            "Prediction error:",
-            e
-        )
+        logger.error("Prediction error: %s", e)
 
-
-        # Delete failed upload
         try:
-
-            if os.path.exists(
-                filepath
-            ):
-
-                os.remove(
-                    filepath
-                )
-
+            if os.path.exists(filepath):
+                os.remove(filepath)
         except Exception:
             pass
 
-
         return jsonify({
-
             "success": False,
-
-            "error":
-                "AI model could not process this image.",
-
-            "details":
-                str(e)
-
+            "error": "AI model could not process this image.",
+            "details": str(e)
         }), 503
+
+
+    # ========================================================
+    # GEMINI AI INSIGHTS
+    # ========================================================
+
+    ai_insights = generate_ai_insights(
+        diagnosis=diagnosis,
+        confidence=confidence,
+        symptoms=symptoms,
+        age=age_value,
+        gender=gender
+    )
 
 
     # ========================================================
@@ -1515,17 +1371,13 @@ def predict_scan():
                 gender,
                 symptoms,
                 image_path,
-                status
+                status,
+                confidence,
+                ai_insights
             )
             VALUES
             (
-                %s,
-                %s,
-                %s,
-                %s,
-                %s,
-                %s,
-                %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
             (
@@ -1535,107 +1387,165 @@ def predict_scan():
                 gender,
                 symptoms,
                 filepath,
-                diagnosis_result
+                diagnosis_result,
+                round(confidence, 1),
+                ai_insights
             )
         )
 
-
         db.commit()
-
-
         scan_id = cursor.lastrowid
-
 
     except Exception as e:
 
+        # Fallback to legacy schema if confidence/ai_insights columns missing
         try:
-            db.rollback()
-        except Exception:
-            pass
+            cursor.execute(
+                """
+                INSERT INTO scan_records
+                (
+                    user_email,
+                    patient_name,
+                    age,
+                    gender,
+                    symptoms,
+                    image_path,
+                    status
+                )
+                VALUES
+                (
+                    %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    user_email,
+                    patient_name,
+                    age_value,
+                    gender,
+                    symptoms,
+                    filepath,
+                    diagnosis_result
+                )
+            )
+            db.commit()
+            scan_id = cursor.lastrowid
+        except Exception as fallback_err:
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
+            logger.error("Database insert error: %s", fallback_err)
 
-        print(
-            "Database insert error:",
-            e
-        )
-
-
-        return jsonify({
-
-            "success": False,
-
-            "error":
-                "Prediction completed, but the screening record could not be saved.",
-
-            "details":
-                str(e)
-
-        }), 500
+            return jsonify({
+                "success": False,
+                "error": "Prediction completed, but the record could not be saved.",
+                "details": str(fallback_err)
+            }), 500
 
 
     # ========================================================
-    # SUCCESS
+    # SUCCESS RESPONSE
     # ========================================================
 
     return jsonify({
-
         "success": True,
-
         "duplicate": False,
-
-        "scan_id":
-            scan_id,
-
-        "result":
-            diagnosis_result,
-
-        "diagnosis":
-            diagnosis,
-
-        "confidence":
-            round(
-                confidence,
-                1
-            )
-
+        "scan_id": scan_id,
+        "result": diagnosis_result,
+        "diagnosis": diagnosis,
+        "confidence": round(confidence, 1),
+        "probabilities": class_probabilities,
+        "ai_insights": ai_insights
     })
 
 
 # ============================================================
-# DASHBOARD STATISTICS
+# SCAN DETAIL PAGE
+# ============================================================
+
+@app.route("/scan/<int:scan_id>")
+def scan_detail(scan_id):
+
+    if "user" not in session:
+        return redirect(url_for("login"))
+
+    try:
+
+        db, cursor = get_db()
+
+        if db is None:
+            return render_template(
+                "404.html"
+            ), 404
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM scan_records
+            WHERE id = %s
+              AND user_email = %s
+            LIMIT 1
+            """,
+            (scan_id, session["user"])
+        )
+
+        record = cursor.fetchone()
+
+        if not record:
+            return render_template(
+                "404.html"
+            ), 404
+
+        # Parse class probabilities from status
+        # (for records without stored probabilities)
+        diagnosis = str(
+            record["status"]
+        ).split(" (")[0]
+
+        conf = record.get("confidence", 0)
+
+        return render_template(
+            "scan_detail.html",
+            record=record,
+            diagnosis=diagnosis,
+            confidence=conf
+        )
+
+    except Exception as e:
+
+        logger.error(
+            "Scan detail error: %s", e
+        )
+
+        return render_template(
+            "404.html"
+        ), 404
+
+
+# ============================================================
+# DASHBOARD STATISTICS API
 # ============================================================
 
 @app.route("/api/stats")
 def api_stats():
 
     if "user" not in session:
-
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Unauthorized"
-
+            "error": "Unauthorized"
         }), 401
-
 
     try:
 
-        if not ensure_db_connection():
+        db, cursor = get_db()
 
+        if db is None:
             return jsonify({
-
                 "success": False,
-
-                "error":
-                    "Database connection failed.",
-
-                "distribution":
-                    []
-
+                "error": "Database connection failed.",
+                "distribution": []
             }), 500
-
 
         cursor.execute(
             """
@@ -1647,68 +1557,101 @@ def api_stats():
             GROUP BY status
             ORDER BY count DESC
             """,
-            (
-                session["user"],
-            )
+            (session["user"],)
         )
-
 
         rows = cursor.fetchall()
 
-
         distribution = []
 
-
         for row in rows:
-
             distribution.append({
-
-                "status":
-                    row["status"],
-
-                "count":
-                    int(row["count"])
-
+                "status": row["status"],
+                "count": int(row["count"])
             })
-
 
         total = sum(
             item["count"]
             for item in distribution
         )
 
-
         return jsonify({
-
             "success": True,
-
-            "total":
-                total,
-
-            "distribution":
-                distribution
-
+            "total": total,
+            "distribution": distribution
         })
-
 
     except Exception as e:
 
-        print(
-            "Stats error:",
-            e
-        )
-
+        logger.error("Stats error: %s", e)
 
         return jsonify({
-
             "success": False,
+            "error": "Unable to load statistics.",
+            "distribution": []
+        }), 500
 
-            "error":
-                "Unable to load statistics.",
 
-            "distribution":
-                []
+# ============================================================
+# MONTHLY TRENDS API
+# ============================================================
 
+@app.route("/api/trends")
+def api_trends():
+
+    if "user" not in session:
+        return jsonify({
+            "success": False,
+            "error": "Unauthorized"
+        }), 401
+
+    try:
+
+        db, cursor = get_db()
+
+        if db is None:
+            return jsonify({
+                "success": False,
+                "trends": []
+            }), 500
+
+        cursor.execute(
+            """
+            SELECT
+                DATE_FORMAT(created_at, '%%Y-%%m') AS month,
+                COUNT(*) AS count
+            FROM scan_records
+            WHERE user_email = %s
+              AND created_at >=
+                  DATE_SUB(NOW(), INTERVAL 12 MONTH)
+            GROUP BY month
+            ORDER BY month ASC
+            """,
+            (session["user"],)
+        )
+
+        rows = cursor.fetchall()
+
+        trends = []
+
+        for row in rows:
+            trends.append({
+                "month": row["month"],
+                "count": int(row["count"])
+            })
+
+        return jsonify({
+            "success": True,
+            "trends": trends
+        })
+
+    except Exception as e:
+
+        logger.error("Trends error: %s", e)
+
+        return jsonify({
+            "success": False,
+            "trends": []
         }), 500
 
 
@@ -1722,21 +1665,14 @@ def api_stats():
 def download_report(scan_id):
 
     if "user" not in session:
-
-        return redirect(
-            url_for("login")
-        )
-
+        return redirect(url_for("login"))
 
     try:
 
-        if not ensure_db_connection():
+        db, cursor = get_db()
 
-            return (
-                "Database connection failed.",
-                500
-            )
-
+        if db is None:
+            return ("Database connection failed.", 500)
 
         cursor.execute(
             """
@@ -1746,215 +1682,178 @@ def download_report(scan_id):
               AND user_email = %s
             LIMIT 1
             """,
-            (
-                scan_id,
-                session["user"]
-            )
+            (scan_id, session["user"])
         )
-
 
         record = cursor.fetchone()
 
-
         if not record:
-
-            return (
-                "Record not found",
-                404
-            )
-
+            return ("Record not found", 404)
 
         # ----------------------------------------------------
-        # PDF
+        # PDF Generation (Enhanced)
         # ----------------------------------------------------
 
         buffer = io.BytesIO()
 
-
         pdf = canvas.Canvas(
-            buffer,
-            pagesize=letter
+            buffer, pagesize=letter
         )
 
+        width, height = letter
 
-        # Header
+        # Colors
+        primary = HexColor("#0f766e")
+        dark = HexColor("#0f172a")
+        muted = HexColor("#64748b")
 
-        pdf.setFont(
-            "Helvetica-Bold",
-            20
-        )
+        # Header bar
+        pdf.setFillColor(primary)
+        pdf.rect(0, height - 80, width, 80, fill=True, stroke=False)
 
+        pdf.setFillColor(HexColor("#ffffff"))
+        pdf.setFont("Helvetica-Bold", 22)
+        pdf.drawString(50, height - 50, "Dermasafe AI")
+
+        pdf.setFont("Helvetica", 11)
         pdf.drawString(
-            50,
-            750,
-            "Dermasafe AI"
-        )
-
-
-        pdf.setFont(
-            "Helvetica",
-            11
-        )
-
-        pdf.drawString(
-            50,
-            730,
+            50, height - 68,
             "AI-Assisted Skin Screening Report"
         )
 
-
-        pdf.line(
-            50,
-            715,
-            560,
-            715
+        # Report ID
+        pdf.drawRightString(
+            width - 50, height - 50,
+            f"Report #{scan_id}"
         )
 
+        pdf.drawRightString(
+            width - 50, height - 68,
+            f"Generated: {datetime.now().strftime('%d %b %Y, %H:%M')}"
+        )
 
         # Patient information
+        y = height - 120
 
-        pdf.setFont(
-            "Helvetica-Bold",
-            13
-        )
+        pdf.setFillColor(dark)
+        pdf.setFont("Helvetica-Bold", 14)
+        pdf.drawString(50, y, "Patient Information")
 
-        pdf.drawString(
-            50,
-            680,
-            "Patient Information"
-        )
+        y -= 8
+        pdf.setStrokeColor(HexColor("#e2e8f0"))
+        pdf.line(50, y, width - 50, y)
 
+        y -= 25
+        pdf.setFont("Helvetica", 11)
+        pdf.setFillColor(muted)
+        pdf.drawString(50, y, "Patient Name")
+        pdf.setFillColor(dark)
+        pdf.drawString(200, y, str(record["patient_name"]))
 
-        pdf.setFont(
-            "Helvetica",
-            11
-        )
+        y -= 22
+        pdf.setFillColor(muted)
+        pdf.drawString(50, y, "Age")
+        pdf.setFillColor(dark)
+        pdf.drawString(200, y, str(record["age"]))
 
+        y -= 22
+        pdf.setFillColor(muted)
+        pdf.drawString(50, y, "Gender")
+        pdf.setFillColor(dark)
+        pdf.drawString(200, y, str(record["gender"]))
 
-        pdf.drawString(
-            50,
-            650,
-            f"Patient Name: {record['patient_name']}"
-        )
-
-
-        pdf.drawString(
-            50,
-            630,
-            f"Age: {record['age']}"
-        )
-
-
-        pdf.drawString(
-            50,
-            610,
-            f"Gender: {record['gender']}"
-        )
-
-
-        pdf.drawString(
-            50,
-            590,
-            f"Date: {record['created_at']}"
-        )
-
+        y -= 22
+        pdf.setFillColor(muted)
+        pdf.drawString(50, y, "Screening Date")
+        pdf.setFillColor(dark)
+        pdf.drawString(200, y, str(record["created_at"]))
 
         # Symptoms
+        y -= 45
 
-        pdf.setFont(
-            "Helvetica-Bold",
-            13
-        )
+        pdf.setFillColor(dark)
+        pdf.setFont("Helvetica-Bold", 14)
+        pdf.drawString(50, y, "Symptoms / Observations")
 
-        pdf.drawString(
-            50,
-            550,
-            "Symptoms / Observations"
-        )
+        y -= 8
+        pdf.line(50, y, width - 50, y)
 
+        y -= 22
+        pdf.setFont("Helvetica", 11)
+        pdf.setFillColor(dark)
 
-        pdf.setFont(
-            "Helvetica",
-            11
-        )
-
-
-        symptoms_text = str(
-            record["symptoms"]
-        )
-
-
+        symptoms_text = str(record["symptoms"])
         symptom_lines = [
-
             symptoms_text[i:i + 80]
-
-            for i in range(
-                0,
-                len(symptoms_text),
-                80
-            )
-
+            for i in range(0, len(symptoms_text), 80)
         ]
 
-
-        y = 525
-
-
         for line in symptom_lines[:5]:
-
-            pdf.drawString(
-                50,
-                y,
-                line
-            )
-
+            pdf.drawString(50, y, line)
             y -= 17
 
-
         # AI Result
+        y -= 30
 
-        y -= 15
+        pdf.setFillColor(dark)
+        pdf.setFont("Helvetica-Bold", 14)
+        pdf.drawString(50, y, "AI Screening Result")
 
-
-        pdf.setFont(
-            "Helvetica-Bold",
-            13
-        )
-
-        pdf.drawString(
-            50,
-            y,
-            "AI Screening Result"
-        )
-
+        y -= 8
+        pdf.line(50, y, width - 50, y)
 
         y -= 30
 
-
-        pdf.setFont(
-            "Helvetica-Bold",
-            12
+        # Result box
+        pdf.setFillColor(HexColor("#ecfdf5"))
+        pdf.roundRect(
+            50, y - 15, width - 100, 40,
+            8, fill=True, stroke=False
         )
 
-        pdf.drawString(
-            50,
-            y,
-            str(
-                record["status"]
-            )
-        )
+        pdf.setFillColor(primary)
+        pdf.setFont("Helvetica-Bold", 16)
+        pdf.drawString(65, y, str(record["status"]))
 
+        # AI Insights (if available)
+        if record.get("ai_insights"):
+
+            y -= 55
+
+            pdf.setFillColor(dark)
+            pdf.setFont("Helvetica-Bold", 14)
+            pdf.drawString(50, y, "AI-Generated Insights")
+
+            y -= 8
+            pdf.line(50, y, width - 50, y)
+
+            y -= 20
+            pdf.setFont("Helvetica", 9)
+            pdf.setFillColor(muted)
+
+            insights_text = str(record["ai_insights"])
+            # Simple line wrapping
+            for line in insights_text.split("\n"):
+                wrapped = [
+                    line[i:i + 95]
+                    for i in range(0, max(len(line), 1), 95)
+                ]
+                for wl in wrapped:
+                    if y < 80:
+                        pdf.showPage()
+                        y = height - 60
+                    pdf.drawString(50, y, wl.strip())
+                    y -= 13
 
         # Disclaimer
+        y -= 30
 
-        y -= 60
+        if y < 100:
+            pdf.showPage()
+            y = height - 60
 
-
-        pdf.setFont(
-            "Helvetica-Oblique",
-            9
-        )
-
+        pdf.setFont("Helvetica-Oblique", 9)
+        pdf.setFillColor(muted)
 
         disclaimer = (
             "This report is generated by an AI-assisted "
@@ -1963,93 +1862,219 @@ def download_report(scan_id):
             "healthcare professional for clinical evaluation."
         )
 
-
         disclaimer_lines = [
-
             disclaimer[i:i + 90]
-
-            for i in range(
-                0,
-                len(disclaimer),
-                90
-            )
-
+            for i in range(0, len(disclaimer), 90)
         ]
 
-
         for line in disclaimer_lines:
-
-            pdf.drawString(
-                50,
-                y,
-                line
-            )
-
+            pdf.drawString(50, y, line)
             y -= 14
 
-
         # Footer
-
-        pdf.setFont(
-            "Helvetica",
-            8
-        )
-
-
+        pdf.setFont("Helvetica", 8)
+        pdf.setFillColor(muted)
         pdf.drawString(
-            50,
-            45,
+            50, 35,
             "Dermasafe AI - Preliminary AI Screening Report"
         )
-
+        pdf.drawRightString(
+            width - 50, 35,
+            f"Confidential - Report #{scan_id}"
+        )
 
         pdf.showPage()
-
         pdf.save()
-
 
         buffer.seek(0)
 
-
         safe_patient_name = secure_filename(
-            str(
-                record["patient_name"]
-            )
+            str(record["patient_name"])
         )
-
 
         if not safe_patient_name:
-
             safe_patient_name = "Patient"
 
-
         return send_file(
-
             buffer,
-
             as_attachment=True,
-
             download_name=(
-                f"Report_{safe_patient_name}_{scan_id}.pdf"
+                f"DermasafeAI_Report_{safe_patient_name}_{scan_id}.pdf"
             ),
-
             mimetype="application/pdf"
-
         )
-
 
     except Exception as e:
 
-        print(
-            "PDF generation error:",
-            e
-        )
-
+        logger.error("PDF generation error: %s", e)
 
         return (
             "Unable to generate report.",
             500
         )
+
+
+# ============================================================
+# EXPORT HISTORY (CSV)
+# ============================================================
+
+@app.route("/export/csv")
+def export_csv():
+
+    if "user" not in session:
+        return redirect(url_for("login"))
+
+    try:
+
+        db, cursor = get_db()
+
+        if db is None:
+            return ("Database connection failed.", 500)
+
+        cursor.execute(
+            """
+            SELECT
+                id,
+                patient_name,
+                age,
+                gender,
+                symptoms,
+                status,
+                confidence,
+                created_at
+            FROM scan_records
+            WHERE user_email = %s
+            ORDER BY created_at DESC
+            """,
+            (session["user"],)
+        )
+
+        rows = cursor.fetchall()
+
+        # Build CSV
+        lines = [
+            "ID,Patient Name,Age,Gender,Symptoms,Result,Confidence,Date"
+        ]
+
+        for row in rows:
+
+            line = ",".join([
+                str(row["id"]),
+                f'"{row["patient_name"]}"',
+                str(row["age"]),
+                row["gender"],
+                f'"{row["symptoms"]}"',
+                f'"{row["status"]}"',
+                str(row.get("confidence", "")),
+                str(row["created_at"])
+            ])
+
+            lines.append(line)
+
+        csv_content = "\n".join(lines)
+        buffer = io.BytesIO(
+            csv_content.encode("utf-8")
+        )
+
+        return send_file(
+            buffer,
+            as_attachment=True,
+            download_name=(
+                f"DermasafeAI_History_{datetime.now().strftime('%Y%m%d')}.csv"
+            ),
+            mimetype="text/csv"
+        )
+
+    except Exception as e:
+
+        logger.error("CSV export error: %s", e)
+        return ("Unable to export.", 500)
+
+
+# ============================================================
+# DELETE SCAN RECORD
+# ============================================================
+
+@app.route(
+    "/scan/<int:scan_id>/delete",
+    methods=["POST"]
+)
+def delete_scan(scan_id):
+
+    if "user" not in session:
+        return jsonify({
+            "success": False,
+            "error": "Unauthorized"
+        }), 401
+
+    try:
+
+        db, cursor = get_db()
+
+        if db is None:
+            return jsonify({
+                "success": False,
+                "error": "Database error"
+            }), 500
+
+        # Verify ownership
+        cursor.execute(
+            """
+            SELECT id, image_path
+            FROM scan_records
+            WHERE id = %s
+              AND user_email = %s
+            LIMIT 1
+            """,
+            (scan_id, session["user"])
+        )
+
+        record = cursor.fetchone()
+
+        if not record:
+            return jsonify({
+                "success": False,
+                "error": "Record not found"
+            }), 404
+
+        # Delete from database
+        cursor.execute(
+            """
+            DELETE FROM scan_records
+            WHERE id = %s
+              AND user_email = %s
+            """,
+            (scan_id, session["user"])
+        )
+
+        db.commit()
+
+        # Try to delete the image file
+        try:
+            img_path = record.get("image_path", "")
+            if img_path and os.path.exists(img_path):
+                os.remove(img_path)
+        except Exception:
+            pass
+
+        logger.info(
+            "Scan %s deleted by %s",
+            scan_id,
+            session["user"]
+        )
+
+        return jsonify({
+            "success": True
+        })
+
+    except Exception as e:
+
+        logger.error("Delete scan error: %s", e)
+
+        return jsonify({
+            "success": False,
+            "error": "Unable to delete."
+        }), 500
 
 
 # ============================================================
@@ -2060,15 +2085,24 @@ def download_report(scan_id):
 def logout():
 
     session.clear()
-
-    return redirect(
-        url_for("login")
-    )
+    return redirect(url_for("login"))
 
 
 # ============================================================
-# FILE TOO LARGE
+# ERROR HANDLERS
 # ============================================================
+
+@app.errorhandler(404)
+def page_not_found(error):
+
+    return render_template("404.html"), 404
+
+
+@app.errorhandler(500)
+def internal_error(error):
+
+    return render_template("500.html"), 500
+
 
 @app.errorhandler(413)
 def file_too_large(error):
@@ -2076,19 +2110,11 @@ def file_too_large(error):
     if request.path == "/predict_scan":
 
         return jsonify({
-
             "success": False,
-
-            "error":
-                "Image is too large. Maximum size is 8 MB."
-
+            "error": "Image is too large. Maximum size is 8 MB."
         }), 413
 
-
-    return (
-        "File too large.",
-        413
-    )
+    return ("File too large.", 413)
 
 
 # ============================================================
@@ -2102,24 +2128,14 @@ if __name__ == "__main__":
     print("       DERMASAFE AI")
     print("   Healthcare AI Screening Platform")
     print("==========================================")
-
-    print(
-        f"Database: {DB_NAME}"
-    )
-
-    print(
-        f"Model available: {model is not None}"
-    )
-
-    print(
-        f"Model path: {MODEL_PATH}"
-    )
-
+    print(f"  Database : {DB_CONFIG['database']}")
+    print(f"  AI Model : {'Ready' if model else 'Unavailable'}")
+    print(f"  Gemini   : {'Ready' if gemini_model else 'Not configured'}")
+    print(f"  Security : {'bcrypt' if HAS_BCRYPT else 'sha256 fallback'} password hashing")
     print("==========================================")
     print()
 
-
     app.run(
         debug=True,
-        threaded=False
+        threaded=True
     )

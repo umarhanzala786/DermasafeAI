@@ -72,7 +72,7 @@ Dashboard | Dermasafe AI
             </div>
 
             <small>
-                Five-class CNN screening model
+                CNN + Gemini AI ({{ gemini_status }})
             </small>
 
         </div>
@@ -112,12 +112,24 @@ Dashboard | Dermasafe AI
             </div>
 
 
-            <a
-                class="btn btn-primary"
-                href="#new-scan"
-            >
-                ＋ New Skin Scan
-            </a>
+            <div class="header-actions">
+
+                <a
+                    class="btn btn-secondary btn-sm"
+                    href="{{ url_for('export_csv') }}"
+                    title="Export scan history as CSV"
+                >
+                    ↓ Export CSV
+                </a>
+
+                <a
+                    class="btn btn-primary"
+                    href="#new-scan"
+                >
+                    ＋ New Skin Scan
+                </a>
+
+            </div>
 
         </header>
 
@@ -161,14 +173,14 @@ Dashboard | Dermasafe AI
 
             <div class="stat-card">
 
-                <span>AI model</span>
+                <span>Avg confidence</span>
 
                 <strong>
-                    {{ model_status }}
+                    {{ avg_confidence }}%
                 </strong>
 
                 <small>
-                    TensorFlow / Keras CNN
+                    Model prediction certainty
                 </small>
 
             </div>
@@ -176,14 +188,14 @@ Dashboard | Dermasafe AI
 
             <div class="stat-card">
 
-                <span>Classes</span>
+                <span>AI engines</span>
 
                 <strong>
-                    05
+                    2
                 </strong>
 
                 <small>
-                    Supported skin conditions
+                    CNN + Gemini AI
                 </small>
 
             </div>
@@ -227,11 +239,6 @@ Dashboard | Dermasafe AI
 
                 </div>
 
-
-                <!-- IMPORTANT:
-                     JavaScript handles this form.
-                     It will NOT submit as normal GET.
-                -->
 
                 <form
                     id="scanForm"
@@ -420,47 +427,85 @@ Dashboard | Dermasafe AI
 
 
             <!-- =================================================
-                 AI INSIGHTS
+                 RIGHT COLUMN — CHARTS
             ================================================== -->
 
-            <section
-                class="panel insight-panel"
-            >
+            <div class="insight-column">
 
-                <div class="panel-heading">
+                <!-- AI INSIGHTS CHART -->
+                <section
+                    class="panel insight-panel"
+                >
 
-                    <div>
+                    <div class="panel-heading">
 
-                        <span class="section-kicker">
-                            AI INSIGHTS
-                        </span>
+                        <div>
 
-                        <h2>
-                            Screening distribution
-                        </h2>
+                            <span class="section-kicker">
+                                AI INSIGHTS
+                            </span>
+
+                            <h2>
+                                Screening distribution
+                            </h2>
+
+                        </div>
 
                     </div>
 
-                </div>
+
+                    <div class="chart-container">
+
+                        <canvas
+                            id="diseaseChart"
+                        ></canvas>
+
+                    </div>
 
 
-                <div class="chart-container">
+                    <div class="insight-note">
 
-                    <canvas
-                        id="diseaseChart"
-                    ></canvas>
+                        Distribution is calculated from
+                        your saved screening records.
 
-                </div>
+                    </div>
+
+                </section>
 
 
-                <div class="insight-note">
+                <!-- MONTHLY TRENDS CHART -->
+                <section
+                    class="panel insight-panel"
+                >
 
-                    Distribution is calculated from
-                    your saved screening records.
+                    <div class="panel-heading">
 
-                </div>
+                        <div>
 
-            </section>
+                            <span class="section-kicker">
+                                MONTHLY TRENDS
+                            </span>
+
+                            <h2>
+                                Scan activity
+                            </h2>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="chart-container chart-container-sm">
+
+                        <canvas
+                            id="trendsChart"
+                        ></canvas>
+
+                    </div>
+
+                </section>
+
+            </div>
 
         </div>
 
@@ -524,7 +569,7 @@ Dashboard | Dermasafe AI
                             </th>
 
                             <th>
-                                Report
+                                Actions
                             </th>
 
                         </tr>
@@ -574,14 +619,31 @@ Dashboard | Dermasafe AI
                             </td>
 
 
-                            <td>
+                            <td class="actions-cell">
+
+                                <a
+                                    class="report-link"
+                                    href="{{ url_for('scan_detail', scan_id=row.id) }}"
+                                    title="View details"
+                                >
+                                    View
+                                </a>
 
                                 <a
                                     class="report-link"
                                     href="{{ url_for('download_report', scan_id=row.id) }}"
+                                    title="Download PDF"
                                 >
                                     PDF ↓
                                 </a>
+
+                                <button
+                                    class="delete-btn"
+                                    data-scan-id="{{ row.id }}"
+                                    title="Delete record"
+                                >
+                                    ✕
+                                </button>
 
                             </td>
 
@@ -620,10 +682,6 @@ Dashboard | Dermasafe AI
 
 {% endblock %}
 
-
-<!-- =========================================================
-     IMPORTANT: LOAD BOTH CHART.JS AND YOUR SCRIPT.JS
-========================================================= -->
 
 {% block scripts %}
 

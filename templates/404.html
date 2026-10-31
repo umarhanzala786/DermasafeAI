@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block title %}Page Not Found | Dermasafe AI{% endblock %}
+{% block content %}
+<section class="error-page">
+    <div class="error-card">
+        <div class="error-code">404</div>
+        <h1>Page not found</h1>
+        <p>The page you're looking for doesn't exist or has been moved.</p>
+        <div class="error-actions">
+            <a class="btn btn-primary" href="{{ url_for('home') }}">Go Home <span>→</span></a>
+            {% if logged_in %}
+            <a class="btn btn-secondary" href="{{ url_for('dashboard') }}">Dashboard</a>
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% endblock %}
+

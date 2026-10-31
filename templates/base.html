@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 
 <head>
   <meta charset="utf-8">
@@ -11,7 +11,7 @@
 
   <meta
     name="description"
-    content="Dermasafe AI - AI-assisted preliminary skin disease screening platform"
+    content="Dermasafe AI - AI-assisted preliminary skin disease screening platform powered by CNN & Gemini AI"
   >
 
   <title>
@@ -65,6 +65,19 @@
         Dermasafe <b>AI</b>
       </span>
     </a>
+
+
+    <!-- Dark Mode Toggle -->
+    <button
+      class="theme-toggle"
+      id="themeToggle"
+      aria-label="Toggle dark mode"
+      type="button"
+      title="Toggle dark mode"
+    >
+      <span class="theme-icon-light">☀</span>
+      <span class="theme-icon-dark">☾</span>
+    </button>
 
 
     <!-- Mobile Menu Button -->
@@ -173,7 +186,7 @@
 
       <p>
         AI-assisted preliminary dermatology
-        screening for smarter clinical workflows.
+        screening powered by CNN & Gemini AI.
       </p>
 
     </div>
@@ -229,10 +242,6 @@
 
   <!-- =====================================================
        MAIN JAVASCRIPT
-       
-       IMPORTANT:
-       script.js is loaded ONLY here.
-       Do not load it again inside dashboard.html.
   ====================================================== -->
 
   <script

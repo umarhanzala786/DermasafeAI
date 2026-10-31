@@ -1,3 +1,89 @@
 {% extends 'base.html' %}
 {% block title %}Profile | Dermasafe AI{% endblock %}
-{% block content %}<section class="simple-page"><div class="page-title"><span class="section-kicker">ACCOUNT</span><h1>Your profile</h1><p>Manage your workspace identity and review account activity.</p></div><div class="profile-grid"><section class="panel profile-card"><div class="profile-avatar">{% if user.profile_image %}<img src="{{ url_for('static', filename=user.profile_image) }}" alt="Profile">{% else %}{{ user.username[0]|upper }}{% endif %}</div><h2>{{ user.username }}</h2><p>{{ user.email }}</p><form method="POST" enctype="multipart/form-data"><label>Profile image<input type="file" name="profile_image" accept="image/png,image/jpeg,image/webp" required></label><button class="btn btn-secondary" type="submit">Update picture</button></form></section><section class="panel"><div class="panel-heading"><div><span class="section-kicker">ACCOUNT DETAILS</span><h2>Workspace information</h2></div></div><div class="detail-list"><div><span>Full name</span><strong>{{ user.username }}</strong></div><div><span>Email</span><strong>{{ user.email }}</strong></div><div><span>Member since</span><strong>{{ user.created_at.strftime('%d %b %Y') if user.created_at else 'N/A' }}</strong></div><div><span>Total scans</span><strong>{{ total_scans }}</strong></div></div><a class="btn btn-primary" href="{{ url_for('dashboard') }}">Back to Dashboard →</a></section></div></section>{% endblock %}
+{% block content %}
+<section class="simple-page">
+
+    <div class="page-title">
+        <span class="section-kicker">ACCOUNT</span>
+        <h1>Your profile</h1>
+        <p>Manage your workspace identity and review account activity.</p>
+    </div>
+
+    <div class="profile-grid">
+
+        <section class="panel profile-card">
+
+            <div class="profile-avatar">
+                {% if user.profile_image %}
+                    <img src="{{ url_for('static', filename=user.profile_image) }}" alt="Profile">
+                {% else %}
+                    {{ user.username[0]|upper }}
+                {% endif %}
+            </div>
+
+            <h2>{{ user.username }}</h2>
+            <p>{{ user.email }}</p>
+
+            <form method="POST" enctype="multipart/form-data">
+                <label>
+                    Profile image
+                    <input
+                        type="file"
+                        name="profile_image"
+                        accept="image/png,image/jpeg,image/webp"
+                        required
+                    >
+                </label>
+                <button class="btn btn-secondary" type="submit">
+                    Update picture
+                </button>
+            </form>
+
+        </section>
+
+        <section class="panel">
+
+            <div class="panel-heading">
+                <div>
+                    <span class="section-kicker">ACCOUNT DETAILS</span>
+                    <h2>Workspace information</h2>
+                </div>
+            </div>
+
+            <div class="detail-list">
+                <div>
+                    <span>Full name</span>
+                    <strong>{{ user.username }}</strong>
+                </div>
+                <div>
+                    <span>Email</span>
+                    <strong>{{ user.email }}</strong>
+                </div>
+                <div>
+                    <span>Member since</span>
+                    <strong>{{ user.created_at.strftime('%d %b %Y') if user.created_at else 'N/A' }}</strong>
+                </div>
+                <div>
+                    <span>Last login</span>
+                    <strong>{{ user.last_login.strftime('%d %b %Y · %H:%M') if user.last_login else 'N/A' }}</strong>
+                </div>
+                <div>
+                    <span>Total scans</span>
+                    <strong>{{ total_scans }}</strong>
+                </div>
+                <div>
+                    <span>Security</span>
+                    <strong>bcrypt encrypted</strong>
+                </div>
+            </div>
+
+            <a class="btn btn-primary" href="{{ url_for('dashboard') }}">
+                Back to Dashboard →
+            </a>
+
+        </section>
+
+    </div>
+
+</section>
+{% endblock %}

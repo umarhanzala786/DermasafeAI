@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block title %}Server Error | Dermasafe AI{% endblock %}
+{% block content %}
+<section class="error-page">
+    <div class="error-card">
+        <div class="error-code">500</div>
+        <h1>Something went wrong</h1>
+        <p>An unexpected error occurred. Our team has been notified. Please try again later.</p>
+        <div class="error-actions">
+            <a class="btn btn-primary" href="{{ url_for('home') }}">Go Home <span>→</span></a>
+            {% if logged_in %}
+            <a class="btn btn-secondary" href="{{ url_for('dashboard') }}">Dashboard</a>
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% endblock %}
+

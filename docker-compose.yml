@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+
+  db:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-Hunza@123}
+      MYSQL_DATABASE: ${DB_NAME:-skin_disease_db}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    restart: always
+    ports:
+      - "5000:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_USER: root
+      DB_PASSWORD: ${DB_PASSWORD:-Hunza@123}
+      DB_NAME: ${DB_NAME:-skin_disease_db}
+      SECRET_KEY: ${SECRET_KEY:-dermasafe_secure_secret_key}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+      - ./uploads:/app/uploads
+      - ./static/uploads:/app/static/uploads
+
+volumes:
+  mysql_data:
+
